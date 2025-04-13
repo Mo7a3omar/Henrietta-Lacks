@@ -106,7 +106,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- Function Definitions ----------------
+# ------------- Function Definitions --------------
 
 def google_speech_recognition(audio_bytes, language_hint=None):
     """
@@ -184,7 +184,7 @@ def text_to_speech(text):
 
 def get_gemini_response(prompt, api_key):
     """
-    Get response from Gemini API with a detailed context for Henrietta Lacks.
+    Get response from Gemini API with detailed context for Henrietta Lacks.
     """
     try:
         genai.configure(api_key=api_key)
@@ -237,7 +237,7 @@ IMPACT ON SCIENCE & ETHICS:
 st.markdown("<h1 class='main-header'>Henrietta Lacks Interactive Chatbot</h1>", unsafe_allow_html=True)
 st.markdown("<p class='subheader'>Ask questions and hear Henrietta's voice</p>", unsafe_allow_html=True)
 
-# If there’s new audio generated (from TTS), play it automatically
+# If new audio was generated (via TTS), play it automatically
 if st.session_state.current_audio and st.session_state.is_speaking:
     st.audio(st.session_state.current_audio, format=st.session_state.audio_format, start_time=0)
     st.markdown("""
@@ -255,7 +255,7 @@ asr_provider = st.sidebar.selectbox(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.info("If audio input is not working, please use the Text Input or File Upload options.")
+st.sidebar.info("If voice input does not work, please use Text Input or File Upload.")
 
 # Create tabs for different input methods
 voice_tab, text_tab, file_tab = st.tabs(["Voice Input", "Text Input", "File Upload"])
@@ -301,7 +301,7 @@ with voice_tab:
                             st.session_state.current_audio = audio_data
                             st.session_state.audio_format = audio_format
                             st.session_state.is_speaking = True
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Failed to transcribe audio. Please try again or use another input method.")
     else:
@@ -329,7 +329,7 @@ with text_tab:
                 st.session_state.current_audio = audio_data
                 st.session_state.audio_format = audio_format
                 st.session_state.is_speaking = True
-            st.experimental_rerun()
+            st.rerun()
 
 # ---------------- File Upload Tab ----------------
 with file_tab:
@@ -365,7 +365,7 @@ with file_tab:
                         st.session_state.current_audio = audio_data
                         st.session_state.audio_format = audio_format
                         st.session_state.is_speaking = True
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.error("Failed to process the uploaded audio. Please try again or use text input.")
 
