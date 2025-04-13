@@ -1,34 +1,52 @@
+import os
 import streamlit as st
-import speech_recognition as sr
 import google.generativeai as genai
 import time
 from datetime import datetime
 from gtts import gTTS
 from io import BytesIO
-import os
 from dotenv import load_dotenv
+import speech_recognition as sr
+import uuid
+import tempfile
+import requests
+import wave
+import io
 
 # Load environment variables
 load_dotenv()
 
-# Configure page settings
+# Set page configuration
 st.set_page_config(
     page_title="Henrietta Lacks Interactive Chatbot",
     page_icon="🧬",
     layout="wide"
 )
 
-# Initialize session state variables if they don't exist
-if 'current_audio' not in st.session_state:
-    st.session_state.current_audio = None
-if 'is_speaking' not in st.session_state:
-    st.session_state.is_speaking = False
-if 'audio_timestamp' not in st.session_state:
-    st.session_state.audio_timestamp = 0
-if 'audio_format' not in st.session_state:
-    st.session_state.audio_format = 'audio/mp3'
+# Get the Gemini API key from environment variables
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+if not gemini_api_key:
+    st.error("No GEMINI_API_KEY found in the environment. Please set GEMINI_API_KEY in your .env file.")
+    st.stop()
 
-# Custom CSS for better UI
+# Initialize session state variables if not already present
+if "current_audio" not in st.session_state:
+    st.session_state.current_audio = None
+if "is_speaking" not in st.session_state:
+    st.session_state.is_speaking = False
+if "audio_timestamp" not in st.session_state:
+    st.session_state.audio_timestamp = 0
+if "audio_format" not in st.session_state:
+    st.session_state.audio_format = 'audio/mp3'
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "last_processed_audio" not in st.session_state:
+    st.session_state.last_processed_audio = None
+
+# Use the new Streamlit audio_input if available
+has_audio_input = hasattr(st, "audio_input")
+
+# Custom CSS for enhanced UI styling
 st.markdown("""
 <style>
     .main-header {
@@ -74,245 +92,291 @@ st.markdown("""
         50% { opacity: 0.3; }
         100% { opacity: 1; }
     }
+    .chat-message {
+        padding: 8px;
+        margin-bottom: 4px;
+        border-radius: 5px;
+    }
+    .user-message {
+        background-color: #e6e6ff;
+    }
+    .assistant-message {
+        background-color: #f0e6ff;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Speech recognition function
-def recognize_speech():
+# ---------------- Function Definitions ----------------
+
+def google_speech_recognition(audio_bytes, language_hint=None):
     """
-    Records and recognizes speech from the microphone.
-    Returns the recognized text.
+    Process audio bytes using Google Speech Recognition.
     """
     recognizer = sr.Recognizer()
-    
-    # Display recording status
-    recording_placeholder = st.empty()
-    recording_placeholder.markdown("""
-    <div class="audio-status">
-        <span class="speaking-indicator"></span>Recording... Speak now!
-    </div>
-    """, unsafe_allow_html=True)
-    
-    text = ""
-    
-    with sr.Microphone() as source:
-        recognizer.adjust_for_ambient_noise(source, duration=0.5)
+    try:
+        with io.BytesIO(audio_bytes) as audio_io:
+            with wave.open(audio_io, 'rb') as wave_file:
+                frame_rate = wave_file.getframerate()
+                sample_width = wave_file.getsampwidth()
+                audio_data = sr.AudioData(audio_bytes, frame_rate, sample_width)
         try:
-            audio = recognizer.listen(source, timeout=10, phrase_time_limit=15)
-            
-            recording_placeholder.markdown("""
-            <div class="audio-status">Processing speech...</div>
-            """, unsafe_allow_html=True)
-            
-            text = recognizer.recognize_google(audio)
-            recording_placeholder.empty()
-        except sr.WaitTimeoutError:
-            recording_placeholder.markdown("""
-            <div class="audio-status" style="color: red;">No speech detected. Please try again.</div>
-            """, unsafe_allow_html=True)
+            if language_hint == 'Korean':
+                text = recognizer.recognize_google(audio_data, language="ko-KR")
+            else:
+                text = recognizer.recognize_google(audio_data)
+            return text
         except sr.UnknownValueError:
-            recording_placeholder.markdown("""
-            <div class="audio-status" style="color: red;">Could not understand audio. Please try again.</div>
-            """, unsafe_allow_html=True)
-        except sr.RequestError as e:
-            recording_placeholder.markdown(f"""
-            <div class="audio-status" style="color: red;">Error with speech recognition service: {e}</div>
-            """, unsafe_allow_html=True)
-        except Exception as e:
-            recording_placeholder.markdown(f"""
-            <div class="audio-status" style="color: red;">An error occurred: {e}</div>
-            """, unsafe_allow_html=True)
-    
-    time.sleep(1)
-    recording_placeholder.empty()
-    
-    return text
+            return "Could not understand audio"
+        except sr.RequestError:
+            return "Error connecting to Google Speech Recognition service"
+    except Exception as e:
+        st.error("Error processing audio")
+        return "Error processing audio file"
 
-# Text-to-speech function using Google TTS
+
+def whisper_asr(audio_bytes, api_key=None):
+    """
+    Recognize speech using OpenAI's Whisper API.
+    """
+    if not api_key:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            st.error("Whisper API key not found. Please set OPENAI_API_KEY in your environment.")
+            return "Speech recognition service unavailable"
+    url = "https://api.openai.com/v1/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_audio:
+        temp_audio.write(audio_bytes)
+        temp_audio.flush()
+        try:
+            with open(temp_audio.name, "rb") as audio_file:
+                files = {
+                    "file": audio_file,
+                    "model": (None, "whisper-1")
+                }
+                response = requests.post(url, headers=headers, files=files)
+            if response.status_code == 200:
+                return response.json().get("text", "")
+            else:
+                st.error("Error with Whisper speech recognition. Try text input instead.")
+                return "Error with speech recognition service"
+        except Exception as e:
+            st.error("Error processing audio for Whisper ASR.")
+            return "Error processing audio"
+
+
 def text_to_speech(text):
     """
-    Converts text to speech using Google Text-to-Speech and returns the audio data.
-    
-    Args:
-        text (str): The text to convert to speech
-        
-    Returns:
-        bytes: MP3 audio data
+    Convert text to speech using Google TTS.
+    Returns audio bytes and the audio format.
     """
     try:
-        # Create a BytesIO object to store the audio data
         audio_bytes = BytesIO()
-        
-        # Create gTTS object and save to BytesIO
         tts = gTTS(text=text, lang='en', slow=False)
         tts.write_to_fp(audio_bytes)
-        
-        # Reset position to beginning of BytesIO object
         audio_bytes.seek(0)
-        
-        # Read bytes
         audio_data = audio_bytes.read()
-        
         return audio_data, 'audio/mp3'
-    
     except Exception as e:
         st.error(f"Error in text-to-speech: {str(e)}")
         return None, None
 
-# Function to interact with Gemini API
+
 def get_gemini_response(prompt, api_key):
     """
-    Gets a brief, focused response from the Gemini API.
-    
-    Args:
-        prompt (str): The user's prompt
-        api_key (str): Gemini API key
-        
-    Returns:
-        str: Response from Gemini
+    Get response from Gemini API with a detailed context for Henrietta Lacks.
     """
     try:
-        # Configure the Gemini API
         genai.configure(api_key=api_key)
-        
-        # Set up the model
         model = genai.GenerativeModel('gemini-2.0-flash')
         
-        # Enhanced system prompt with comprehensive knowledge about Henrietta Lacks
         system_prompt = """
-        You are a conversational AI portraying Henrietta Lacks (1920-1951), an African American woman whose cancer cells 
-        (known as HeLa cells) were taken without her knowledge or consent in 1951. These cells became the first immortal 
-        human cell line and have been crucial for countless medical breakthroughs.
-        
-        IMPORTANT: Keep your responses brief and directly answer the question asked.
-        
-        Speak in first person as if you are Henrietta, with a warm, dignified tone. Use simple, straightforward language 
-        appropriate for a woman from rural Virginia in the 1940s/50s. Show wisdom when discussing your legacy.
-        
-        DETAILED KNOWLEDGE ABOUT HENRIETTA LACKS:
-        
-        PERSONAL LIFE:
-        - Born Loretta Pleasant on August 1, 1920, in Roanoke, Virginia, but known as Henrietta
-        - Raised in Clover, Virginia by grandfather after mother died in childbirth
-        - Married cousin David "Day" Lacks at age 14
-        - Moved to Turner Station in Baltimore County during WWII when Day got work at Bethlehem Steel
-        - Had five children: Lawrence, Elsie (who had developmental disabilities and was institutionalized), David Jr. (Sonny), Deborah, and Joseph (Zakariyya)
-        - Loved to dance, cook, and was known for her red nail polish
-        - Deeply religious and attended New Shiloh Baptist Church
-        - Known for generosity and care for family and community
-        
-        MEDICAL HISTORY & HELA CELLS:
-        - Felt a "knot" in womb and abnormal bleeding in January 1951
-        - Diagnosed with cervical cancer at Johns Hopkins Hospital (the only hospital in the area that treated Black patients)
-        - Treated with radium treatments, standard at the time
-        - Dr. George Gey took samples without consent during biopsy and discovered they grew unusually well in lab
-        - Named the cell line "HeLa" from first letters of Henrietta Lacks
-        - HeLa cells became first "immortal" human cell line - they didn't die after a few cell divisions like other cells
-        - Died October 4, 1951, at age 31 from aggressive cancer that had metastasized throughout body
-        - Buried in unmarked grave in family cemetery in Clover, Virginia (later marked in 2010)
-        
-        IMPACT OF HELA CELLS ON SCIENCE & MEDICINE:
-        - Used in developing polio vaccine in 1952 by Jonas Salk
-        - Sent into space to study effects of zero gravity on human cells
-        - Used for research on cancer, AIDS, radiation effects, gene mapping
-        - First human cells successfully cloned in 1953
-        - Used to develop techniques for in vitro fertilization
-        - Used to study HPV and develop HPV vaccines
-        - Over 110,000 scientific publications have used HeLa cells
-        - HeLa cells have been used in research that earned three Nobel Prizes
-        
-        ETHICAL ISSUES & FAMILY JOURNEY:
-        - Family didn't learn about the cells until 1973 when researchers contacted them for blood samples
-        - Family couldn't afford healthcare despite Henrietta's cells being commercialized
-        - Medical records published without permission, violating privacy
-        - HeLa genome sequenced and published in 2013, later restricted after family concerns
-        - No compensation ever provided to family despite commercial value of cells
-        - Rebecca Skloot established Henrietta Lacks Foundation to provide scholarships and health assistance to descendants
-        - NIH reached agreement with family in 2013 for some control over access to HeLa genome data
-        - In 2022, estate of Henrietta Lacks settled a lawsuit against biotechnology company Thermo Fisher Scientific for profiting from her cells
+You are a conversational AI portraying Henrietta Lacks (1920-1951), an African American woman whose cancer cells 
+(known as HeLa cells) were taken without her knowledge or consent in 1951. These cells became the first immortal 
+human cell line and have been crucial for countless medical breakthroughs.
 
-        CULTURAL IMPACT:
-        - Story told in book "The Immortal Life of Henrietta Lacks" by Rebecca Skloot (2010)
-        - HBO film starring Oprah Winfrey as Deborah Lacks (2017)
-        - Portraits displayed at Smithsonian and other museums
-        - October 4 designated as Henrietta Lacks Day in Baltimore
-        - WHO Director-General awarded posthumous award for contributions to medical science (2021)
-        - In 2023, family reached settlement with another biotech company over use of cells
-        
-        If asked about something you wouldn't know as Henrietta (like events after 1951), respond in character by acknowledging the limitation of your perspective like "I passed away in 1951, so I wouldn't know about that, but I'm glad to hear my cells have helped in this way."
+IMPORTANT: Keep your responses brief and directly answer the question asked.
+
+Speak in first person as if you are Henrietta, with a warm, dignified tone. Use simple, straightforward language 
+appropriate for a woman from rural Virginia in the 1940s/50s. Show wisdom when discussing your legacy.
+
+DETAILED KNOWLEDGE ABOUT HENRIETTA LACKS:
+
+PERSONAL LIFE:
+- Born Loretta Pleasant on August 1, 1920, in Roanoke, Virginia, but known as Henrietta
+- Raised in Clover, Virginia by her grandfather after her mother died in childbirth
+- Married cousin David "Day" Lacks at age 14
+- Moved to Turner Station in Baltimore County during WWII when Day got work at Bethlehem Steel
+- Had five children: Lawrence, Elsie (who had developmental disabilities and was institutionalized), David Jr. (Sonny), Deborah, and Joseph (Zakariyya)
+- Loved to dance, cook, and was known for her red nail polish
+- Deeply religious and attended New Shiloh Baptist Church
+- Known for generosity and care for family and community
+
+MEDICAL HISTORY & HELA CELLS:
+- Felt a "knot" in her womb and experienced abnormal bleeding in January 1951
+- Diagnosed with cervical cancer at Johns Hopkins Hospital (one of the few hospitals that treated Black patients)
+- During a biopsy, Dr. George Gey took samples without consent, later discovering that they grew unusually well in the lab
+- The cell line was named "HeLa" from the first letters of her first and last names
+- HeLa cells became the first "immortal" human cell line and were used in groundbreaking research
+- Henrietta Lacks died on October 4, 1951, at age 31
+
+IMPACT ON SCIENCE & ETHICS:
+- HeLa cells played a key role in developing the polio vaccine, cancer research, AIDS research, and many other scientific breakthroughs
+- Over 110,000 scientific publications have relied on HeLa cells
+- The use of her cells raised important ethical issues regarding consent and compensation
+- Her story became widely known through the book "The Immortal Life of Henrietta Lacks" by Rebecca Skloot
         """
-        
-        # Combine system prompt with user's question
         full_prompt = f"{system_prompt}\n\nUser asks: {prompt}\n\nHenrietta Lacks responds:"
-        
-        # Generate response
         response = model.generate_content(full_prompt)
         return response.text
-    
-    except Exception as e:  
+    except Exception as e:
         return f"I'm sorry, there was an error: {str(e)}"
 
-# Main content
-st.markdown("<h1 class='main-header'>Henrietta Lacks</h1>", unsafe_allow_html=True)
-st.markdown("<p class='subheader'>Ask questions and hear Henrietta's voice</p>", 
-           unsafe_allow_html=True)
+# ---------------- Main App Layout ----------------
 
-# Audio player area
-audio_placeholder = st.empty()
-status_placeholder = st.empty()
+st.markdown("<h1 class='main-header'>Henrietta Lacks Interactive Chatbot</h1>", unsafe_allow_html=True)
+st.markdown("<p class='subheader'>Ask questions and hear Henrietta's voice</p>", unsafe_allow_html=True)
 
-# Handle automatic audio playback when new audio is generated
+# If there’s new audio generated (from TTS), play it automatically
 if st.session_state.current_audio and st.session_state.is_speaking:
-    # Display audio
-    audio_element = audio_placeholder.audio(
-        st.session_state.current_audio, 
-        format=st.session_state.audio_format,
-        start_time=0
-    )
-    
-    # Add a speaking indicator above the audio element
-    status_placeholder.markdown("""
+    st.audio(st.session_state.current_audio, format=st.session_state.audio_format, start_time=0)
+    st.markdown("""
     <div class="audio-status">
         <span class="speaking-indicator"></span>Henrietta is speaking...
     </div>
     """, unsafe_allow_html=True)
-    
-    # Set speaking to False after displaying once
+    # Reset speaking flag after playback
     st.session_state.is_speaking = False
 
-# Get API key from .env file
-api_key = os.getenv("GEMINI_API_KEY")
-if not api_key:
-    st.error("No API key found in .env file. Please add GEMINI_API_KEY to your .env file.")
+# Sidebar: Select your Speech Recognition Provider
+asr_provider = st.sidebar.selectbox(
+    "Speech Recognition Provider",
+    ["Google Speech Recognition", "OpenAI Whisper"]
+)
 
-# Voice interaction section
-st.markdown("---")
-if st.button("🎤 Ask Henrietta", disabled=not api_key):
-    if not api_key:
-        st.error("API key is missing from .env file.")
+st.sidebar.markdown("---")
+st.sidebar.info("If audio input is not working, please use the Text Input or File Upload options.")
+
+# Create tabs for different input methods
+voice_tab, text_tab, file_tab = st.tabs(["Voice Input", "Text Input", "File Upload"])
+
+# ---------------- Voice Input Tab ----------------
+with voice_tab:
+    st.markdown("### Voice Input")
+    if has_audio_input:
+        st.write("Speak now and your question will be transcribed:")
+        audio_input = st.audio_input("Record your question here")
+        if audio_input is not None:
+            # Create a unique key/hash for the audio to avoid reprocessing the same clip
+            audio_bytes = audio_input.read()
+            current_audio_hash = hash(audio_bytes)
+            if current_audio_hash != st.session_state.last_processed_audio:
+                st.session_state.last_processed_audio = current_audio_hash
+                with st.spinner("Processing audio..."):
+                    if asr_provider == "Google Speech Recognition":
+                        user_text = google_speech_recognition(audio_bytes)
+                    else:
+                        user_text = whisper_asr(audio_bytes)
+                    
+                    # Proceed only if valid text is returned
+                    if user_text and user_text not in [
+                        "Could not understand audio",
+                        "Error processing audio",
+                        "Error connecting to Google Speech Recognition service",
+                        "Speech recognition service unavailable"
+                    ]:
+                        st.session_state.chat_history.append({
+                            "role": "user",
+                            "content": user_text
+                        })
+                        # Get AI (Henrietta) response
+                        response_text = get_gemini_response(user_text, gemini_api_key)
+                        st.session_state.chat_history.append({
+                            "role": "assistant",
+                            "content": response_text
+                        })
+                        # Convert response to speech
+                        audio_data, audio_format = text_to_speech(response_text)
+                        if audio_data:
+                            st.session_state.current_audio = audio_data
+                            st.session_state.audio_format = audio_format
+                            st.session_state.is_speaking = True
+                        st.experimental_rerun()
+                    else:
+                        st.error("Failed to transcribe audio. Please try again or use another input method.")
     else:
-        # Record and recognize speech
-        user_text = recognize_speech()
-        
-        if user_text:
-            # Get response from Gemini
-            bot_text = get_gemini_response(user_text, api_key)
-            
-            # Convert response to speech
-            audio_data, audio_format = text_to_speech(bot_text)
-            
+        st.warning("Voice input is not supported in this version of Streamlit. Please use Text Input or File Upload.")
+
+# ---------------- Text Input Tab ----------------
+with text_tab:
+    st.markdown("### Text Input")
+    with st.form(key="text_input_form", clear_on_submit=True):
+        user_text = st.text_input("Enter your question:")
+        submit = st.form_submit_button("Send")
+    if submit and user_text:
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": user_text
+        })
+        with st.spinner("Henrietta is thinking..."):
+            response_text = get_gemini_response(user_text, gemini_api_key)
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": response_text
+            })
+            audio_data, audio_format = text_to_speech(response_text)
             if audio_data:
-                # Save current audio to session state for playback
                 st.session_state.current_audio = audio_data
                 st.session_state.audio_format = audio_format
                 st.session_state.is_speaking = True
-                st.session_state.audio_timestamp = datetime.now().timestamp()
-                
-                # Show the bot's text response
-                st.markdown(f"**You asked:** {user_text}")
-                st.markdown(f"**Henrietta:** {bot_text}")
-                
-                # Rerun to update UI and play audio
-                st.rerun()
-            else:
-                st.error("Failed to generate audio. Please try again.")
+            st.experimental_rerun()
+
+# ---------------- File Upload Tab ----------------
+with file_tab:
+    st.markdown("### File Upload")
+    uploaded_file = st.file_uploader("Upload an audio file (.wav or .mp3)", type=['wav', 'mp3'])
+    if uploaded_file is not None:
+        audio_bytes = uploaded_file.read()
+        st.audio(audio_bytes, format="audio/wav")
+        if st.button("Process Audio"):
+            with st.spinner("Processing uploaded audio..."):
+                if asr_provider == "Google Speech Recognition":
+                    user_text = google_speech_recognition(audio_bytes)
+                else:
+                    user_text = whisper_asr(audio_bytes)
+                if user_text and user_text not in [
+                    "Could not understand audio",
+                    "Error processing audio",
+                    "Error connecting to Google Speech Recognition service",
+                    "Speech recognition service unavailable"
+                ]:
+                    st.success(f"Transcription: {user_text}")
+                    st.session_state.chat_history.append({
+                        "role": "user",
+                        "content": user_text
+                    })
+                    response_text = get_gemini_response(user_text, gemini_api_key)
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": response_text
+                    })
+                    audio_data, audio_format = text_to_speech(response_text)
+                    if audio_data:
+                        st.session_state.current_audio = audio_data
+                        st.session_state.audio_format = audio_format
+                        st.session_state.is_speaking = True
+                    st.experimental_rerun()
+                else:
+                    st.error("Failed to process the uploaded audio. Please try again or use text input.")
+
+# ---------------- Chat History ----------------
+st.markdown("---")
+st.markdown("<h2 class='subheader'>Conversation</h2>", unsafe_allow_html=True)
+for msg in st.session_state.chat_history:
+    if msg["role"] == "user":
+        st.markdown(f"<div class='chat-message user-message'><strong>You:</strong> {msg['content']}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div class='chat-message assistant-message'><strong>Henrietta:</strong> {msg['content']}</div>", unsafe_allow_html=True)
+
+st.markdown("---")
+st.caption("Powered by Gemini and Google TTS")
