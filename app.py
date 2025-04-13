@@ -249,11 +249,11 @@ def get_gemini_response(prompt, api_key):
         response = model.generate_content(full_prompt)
         return response.text
     
-    except Exception as e:
+    except Exception as e:  
         return f"I'm sorry, there was an error: {str(e)}"
 
 # Main content
-st.markdown("<h1 class='main-header'>Henrietta Lacks Interactive Chatbot</h1>", unsafe_allow_html=True)
+st.markdown("<h1 class='main-header'>Henrietta Lacks</h1>", unsafe_allow_html=True)
 st.markdown("<p class='subheader'>Ask questions and hear Henrietta's voice</p>", 
            unsafe_allow_html=True)
 
